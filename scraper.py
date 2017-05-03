@@ -1,23 +1,141 @@
-# This is a template for a Python scraper on Morph (https://morph.io)
-# including some code snippets below that you should find helpful
+# -*- coding: utf-8 -*-
 
-# import scraperwiki
-# import lxml.html
-#
-# # Read in a page
-# html = scraperwiki.scrape("http://foo.com")
-#
-# # Find something on the page using css selectors
-# root = lxml.html.fromstring(html)
-# root.cssselect("div[align='left']")
-#
-# # Write out to the sqlite database using scraperwiki library
-# scraperwiki.sqlite.save(unique_keys=['name'], data={"name": "susan", "occupation": "software developer"})
-#
-# # An arbitrary query against the database
-# scraperwiki.sql.select("* from data where 'name'='peter'")
+#### IMPORTS 1.0
 
-# You don't have to do things with the ScraperWiki and lxml libraries. You can use whatever libraries are installed
-# on Morph for Python (https://github.com/openaustralia/morph-docker-python/blob/master/pip_requirements.txt) and all that matters
-# is that your final data is written to an Sqlite database called data.sqlite in the current working directory which
-# has at least a table called data.
+import os
+import re
+import scraperwiki
+import urllib2
+from datetime import datetime
+from bs4 import BeautifulSoup
+
+
+#### FUNCTIONS 1.0
+
+def validateFilename(filename):
+    filenameregex = '^[a-zA-Z0-9]+_[a-zA-Z0-9]+_[a-zA-Z0-9]+_[0-9][0-9][0-9][0-9]_[0-9QY][0-9]$'
+    dateregex = '[0-9][0-9][0-9][0-9]_[0-9QY][0-9]'
+    validName = (re.search(filenameregex, filename) != None)
+    found = re.search(dateregex, filename)
+    if not found:
+        return False
+    date = found.group(0)
+    now = datetime.now()
+    year, month = date[:4], date[5:7]
+    validYear = (2000 <= int(year) <= now.year)
+    if 'Q' in date:
+        validMonth = (month in ['Q0', 'Q1', 'Q2', 'Q3', 'Q4'])
+    elif 'Y' in date:
+        validMonth = (month in ['Y1'])
+    else:
+        try:
+            validMonth = datetime.strptime(date, "%Y_%m") < now
+        except:
+            return False
+    if all([validName, validYear, validMonth]):
+        return True
+
+
+def validateURL(url):
+    try:
+        r = urllib2.urlopen(url)
+        count = 1
+        while r.getcode() == 500 and count < 4:
+            print ("Attempt {0} - Status code: {1}. Retrying.".format(count, r.status_code))
+            count += 1
+            r = urllib2.urlopen(url)
+        sourceFilename = r.headers.get('Content-Disposition')
+
+        if sourceFilename:
+            ext = os.path.splitext(sourceFilename)[1].replace('"', '').replace(';', '').replace(' ', '')
+        else:
+            ext = os.path.splitext(url)[1]
+        validURL = r.getcode() == 200
+        validFiletype = ext.lower() in ['.csv', '.xls', '.xlsx']
+        return validURL, validFiletype
+    except:
+        print ("Error validating URL.")
+        return False, False
+
+def validate(filename, file_url):
+    validFilename = validateFilename(filename)
+    validURL, validFiletype = validateURL(file_url)
+    if not validFilename:
+        print filename, "*Error: Invalid filename*"
+        print file_url
+        return False
+    if not validURL:
+        print filename, "*Error: Invalid URL*"
+        print file_url
+        return False
+    if not validFiletype:
+        print filename, "*Error: Invalid filetype*"
+        print file_url
+        return False
+    return True
+
+
+def convert_mth_strings ( mth_string ):
+    month_numbers = {'JAN': '01', 'FEB': '02', 'MAR':'03', 'APR':'04', 'MAY':'05', 'JUN':'06', 'JUL':'07', 'AUG':'08', 'SEP':'09','OCT':'10','NOV':'11','DEC':'12' }
+    for k, v in month_numbers.items():
+        mth_string = mth_string.replace(k, v)
+    return mth_string
+
+
+#### VARIABLES 1.0
+
+entity_id = "E5014_HAFLBC_gov"
+url = 'https://www.lbhf.gov.uk/councillors-and-democracy/data-and-information/transparency/procurement-and-financial-data'
+errors = 0
+data = []
+
+#### READ HTML 1.0
+
+
+html = urllib2.urlopen(url)
+soup = BeautifulSoup(html, 'lxml')
+
+
+#### SCRAPE DATA
+
+block = soup.find('section', attrs = {'class':'col-section body'}).find_all('ul')[1]
+links = block.find_all('a', href =True)
+for link in links:
+    if '.xlsx' in link['href']:
+        url = 'https://www.lbhf.gov.uk' + link['href']
+        csvfiles = link.text
+        q_name = int(csvfiles.split('Q')[-1].split(' ')[0].strip())
+        csvYr = csvfiles.split('/')[0].split(' ')[-1].strip()
+        if q_name == 4:
+            q_name = 4-3
+            csvMth = 'Q' + str(q_name)
+            csvYr = str(int(csvYr) + 1)
+        else:
+            q_name = q_name+1
+            csvMth = 'Q' + str(q_name)
+        csvMth = convert_mth_strings(csvMth.upper())
+        data.append([csvYr, csvMth, url])
+
+
+
+#### STORE DATA 1.0
+
+for row in data:
+    csvYr, csvMth, url = row
+    filename = entity_id + "_" + csvYr + "_" + csvMth
+    todays_date = str(datetime.now())
+    file_url = url.strip()
+
+    valid = validate(filename, file_url)
+
+    if valid == True:
+        scraperwiki.sqlite.save(unique_keys=['l'], data={"l": file_url, "f": filename, "d": todays_date })
+        print filename
+    else:
+        errors += 1
+
+if errors > 0:
+    raise Exception("%d errors occurred during scrape." % errors)
+
+
+#### EOF
